@@ -4,6 +4,7 @@
 
 * [**Manual PostgreSQL Deployment with Persistent Storage**](#manual-postgresql-deployment-with-persistent-storage)
 * [**PostgreSQL Initialization and Manual Replication**](#postgresql-initialization-and-manual-replication)
+* [**Backup, PITR and Restore**](#backup-pitr-and-restore)
 
 ## **Manual PostgreSQL Deployment with Persistent Storage**
 
@@ -22,7 +23,7 @@ Before beginning, ensure the following are installed and configured:
 
 ---
 
-### **Folder Structure**
+### **Folder Structure for Day 1**
 
 ```
 day1-postgres-deployment/
@@ -269,7 +270,7 @@ kubectl run -it postgres-client --rm --image=postgres \
 
 ---
 
-### **Folder Structure**
+### **Folder Structure for Day 2**
 
 ```
 day2-postgres-replication/
@@ -284,7 +285,7 @@ day2-postgres-replication/
 
 ---
 
-### **Hands-On Guide**
+### **Hands-On Guide for Day 2**
 
 * [**Create Init Scripts for Primary Initialization**](#create-init-scripts-for-primary-initialization)
 * [**Create Secret for Replication Credentials**](#create-secret-for-replication-credentials)
@@ -462,5 +463,227 @@ SELECT * FROM test;
 ```
 
 > You should see the same data — replication works!
+
+---
+
+## **Backup, PITR and Restore**
+
+* [**Backup Strategies in PostgreSQL**](#backup-strategies-in-postgresql)
+* [**Write-Ahead Logging**](#write-ahead-logging)
+* [**Point-In-Time Recovery**](#point-in-time-recovery)
+* [**Folder Structure for Day 3**](#folder-structure-for-day-3)
+* [**Hands-On Guide for Day 3**](#hands-on-guide-for-day-3)
+
+### **Backup Strategies in PostgreSQL**
+
+| Type     | Tool Used       | Description                        |
+| -------- | --------------- | ---------------------------------- |
+| Physical | `pg_basebackup` | Exact file-level copy of data dir  |
+| Logical  | `pg_dump`       | SQL dump of database schema + data |
+
+> We focus on **physical backup** today, required for WAL-based PITR.
+
+---
+
+### **Write-Ahead Logging**
+
+* WAL logs every change before applying it to disk.
+* Enables:
+
+  * Crash recovery
+  * Streaming replication
+  * PITR
+
+* Logs are archived externally for PITR.
+
+---
+
+### **Point-In-Time Recovery**
+
+* Restore from a physical backup
+* Reapply WAL files *up to a specific timestamp*
+* Useful for recovering from accidental data loss
+
+---
+
+### **Folder Structure for Day 3**
+
+```
+day3-backup-pitr/
+├── cronjob-backup.yaml
+├── backup-script.sh
+├── wal-archive-pvc.yaml
+├── recovery-statefulset.yaml
+├── recovery.conf (PostgreSQL 12+ = standby.signal)
+```
+
+---
+
+### **Hands-On Guide for Day 3**
+
+* [**Enable WAL Archiving in Primary**](#enable-wal-archiving-in-primary)
+* [**Create PVC for WAL Archive**](#create-pvc-for-wal-archive)
+* [**Take Physical Backup with `pg_basebackup`**](#take-physical-backup-with-pg_basebackup)
+* [**Automate with Kubernetes CronJob**](#automate-with-kubernetes-cronjob)
+* [**Perform PITR**](#perform-pitr)
+* [**Validate PITR**](#validate-pitr)
+
+#### **Enable WAL Archiving in Primary**
+
+Update `postgresql.conf` via ConfigMap:
+
+```ini
+archive_mode = on
+archive_command = 'cp %p /wal-archive/%f'
+wal_level = replica
+archive_timeout = 60
+```
+
+Mount `/wal-archive` to a PVC or NFS volume:
+
+```yaml
+volumeMounts:
+  - name: wal-archive
+    mountPath: /wal-archive
+```
+
+---
+
+#### **Create PVC for WAL Archive**
+
+```yaml
+# wal-archive-pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wal-archive-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+Apply:
+
+```bash
+kubectl apply -f wal-archive-pvc.yaml
+```
+
+---
+
+#### **Take Physical Backup with `pg_basebackup`**
+
+Create a `Job` or use a sidecar container:
+
+**backup-script.sh**
+
+```bash
+#!/bin/bash
+pg_basebackup -h postgres-0.postgres.default.svc.cluster.local \
+  -U replicator \
+  -D /backup/pgdata \
+  -Fp -Xs -P -R
+
+touch /backup/pgdata/backup_label
+```
+
+Mount `/backup` to PVC or NFS volume.
+
+---
+
+#### **Automate with Kubernetes CronJob**
+
+```yaml
+# cronjob-backup.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-backup-job
+spec:
+  schedule: "0 */6 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: backup
+              image: postgres:15
+              command: ["/scripts/backup-script.sh"]
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                - name: scripts
+                  mountPath: /scripts
+          restartPolicy: OnFailure
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: pg-backup-pvc
+            - name: scripts
+              configMap:
+                name: backup-script
+```
+
+---
+
+#### **Perform PITR**
+
+**Prepare Recovery Config**
+
+Create a new StatefulSet using the backup and WAL archive:
+
+```ini
+# recovery.conf (for versions < 12) — For 12+, use recovery.signal file
+restore_command = 'cp /wal-archive/%f %p'
+recovery_target_time = '2025-06-04 10:00:00'
+```
+
+Create an empty file `recovery.signal` in `/var/lib/postgresql/data/`
+
+**Modify StatefulSet**
+
+```yaml
+# recovery-statefulset.yaml
+volumeMounts:
+  - name: backup
+    mountPath: /var/lib/postgresql/data
+  - name: wal-archive
+    mountPath: /wal-archive
+initContainers:
+  - name: copy-backup
+    image: busybox
+    command: ["sh", "-c", "cp -r /backup/pgdata/* /var/lib/postgresql/data/"]
+    volumeMounts:
+      - name: backup
+        mountPath: /backup
+      - name: data
+        mountPath: /var/lib/postgresql/data
+```
+
+Deploy:
+
+```bash
+kubectl apply -f recovery-statefulset.yaml
+```
+
+---
+
+#### **Validate PITR**
+
+**1.** Connect to the recovered pod:
+
+```bash
+kubectl exec -it recovery-0 -- psql -U postgres -d appdb
+```
+
+**2.** Run a query:
+
+```sql
+SELECT * FROM test;
+```
+
+**3.** Confirm that data has been recovered **up to the specified timestamp**.
 
 ---
