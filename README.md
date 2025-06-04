@@ -5,6 +5,7 @@
 * [**Manual PostgreSQL Deployment with Persistent Storage**](#manual-postgresql-deployment-with-persistent-storage)
 * [**PostgreSQL Initialization and Manual Replication**](#postgresql-initialization-and-manual-replication)
 * [**Backup, PITR and Restore**](#backup-pitr-and-restore)
+* [**High Availability and Manual Failover**](#high-availability-and-manual-failover)
 
 ## **Manual PostgreSQL Deployment with Persistent Storage**
 
@@ -685,5 +686,202 @@ SELECT * FROM test;
 ```
 
 **3.** Confirm that data has been recovered **up to the specified timestamp**.
+
+---
+
+## **High Availability and Manual Failover**
+
+* [**What is High Availability**](#what-is-high-availability)
+* [**Limitations of Manual HA Without an Operator**](#limitations-of-manual-ha-without-an-operator)
+* [**Leader Election and Traffic Redirection**](#leader-election-and-traffic-redirection)
+* [**Folder Structure for Day 4**](#folder-structure-for-day-4)
+* [**Hands-On Guide for Day 4**](#hands-on-guide-for-day-4)
+
+### **What is High Availability**
+
+High Availability ensures PostgreSQL remains accessible even in the event of:
+
+* Pod failures
+* Node crashes
+* Scheduled maintenance
+
+In our setup:
+
+* **Primary** handles writes
+* **Replicas** serve read-only queries and can be promoted manually
+
+---
+
+### **Limitations of Manual HA Without an Operator**
+
+| Challenge               | Description                                                |
+| ----------------------- | ---------------------------------------------------------- |
+| Manual Promotion        | No automated detection or switchover                       |
+| Split Brain             | Risk if both old primary and promoted replica are writable |
+| DNS Propagation         | Re-routing clients can be error-prone and slow             |
+| StatefulSet Limitations | Identity management is static; requires careful handling   |
+
+---
+
+### **Leader Election and Traffic Redirection**
+
+Without an operator, **leadership logic** and **client traffic** redirection must be handled using:
+
+* Kubernetes Services (e.g., `ClusterIP`/`Headless`)
+* Manual `pg_ctl promote` commands
+* Optional CronJobs or sidecars for health/failover checks
+
+---
+
+### **Folder Structure for Day 4**
+
+```
+day4-ha-failover/
+├── primary-service.yaml
+├── readiness-liveness.yaml
+├── promote-replica.sh
+├── failover-checker.yaml
+├── pod-anti-affinity.yaml
+```
+
+---
+
+### **Hands-On Guide for Day 4**
+
+* [**Simulate Primary Failure**](#simulate-primary-failure)
+* [**Promote a Replica**](#promote-a-replica)
+* [**Redirect Client Traffic**](#redirect-client-traffic)
+* [**Add Readiness & Liveness Probes**](#add-readiness--liveness-probes)
+* [**Use Pod Anti-Affinity for HA**](#use-pod-anti-affinity-for-ha)
+* [**Implement Failover Detection**](#implement-failover-detection)
+
+#### **Simulate Primary Failure**
+
+You can simulate a primary pod failure by deleting it:
+
+```bash
+kubectl delete pod postgres-0
+```
+
+OR simulate a node crash (if multi-node setup):
+
+```bash
+kubectl cordon <node-name>
+kubectl drain <node-name> --ignore-daemonsets
+```
+
+---
+
+#### **Promote a Replica**
+
+Manually connect to a replica pod and promote:
+
+```bash
+kubectl exec -it postgres-1 -- bash
+pg_ctl promote -D /var/lib/postgresql/data
+```
+
+> This converts the replica to a standalone writable primary.
+
+---
+
+#### **Redirect Client Traffic**
+
+Update `postgres-primary-svc` to point to the new leader pod:
+
+```yaml
+# primary-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: postgres-1
+  ports:
+    - port: 5432
+      targetPort: 5432
+```
+
+Apply:
+
+```bash
+kubectl apply -f primary-service.yaml
+```
+
+Clients using `postgres-primary` will now connect to the new promoted pod.
+
+---
+
+#### **Add Readiness & Liveness Probes**
+
+```yaml
+# readiness-liveness.yaml (to be added in StatefulSet spec)
+readinessProbe:
+  exec:
+    command: ["pg_isready", "-U", "postgres"]
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  failureThreshold: 3
+
+livenessProbe:
+  exec:
+    command: ["pg_isready", "-U", "postgres"]
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 5
+```
+
+These ensure Kubernetes recognizes pod health and availability before routing traffic.
+
+---
+
+#### **Use Pod Anti-Affinity for HA**
+
+Distribute pods across nodes to prevent single-point failure:
+
+```yaml
+# pod-anti-affinity.yaml
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: postgres
+        topologyKey: "kubernetes.io/hostname"
+```
+
+Add this to the StatefulSet to schedule pods on different nodes.
+
+---
+
+#### **Implement Failover Detection**
+
+Create a simple CronJob to detect primary failure and promote a replica:
+
+```yaml
+# failover-checker.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: failover-checker
+spec:
+  schedule: "*/2 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: failover-checker
+              image: postgres:15
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  if ! pg_isready -h postgres-primary.default.svc.cluster.local; then
+                    kubectl exec postgres-1 -- pg_ctl promote -D /var/lib/postgresql/data
+                    # Update Service selector via script or webhook if needed
+                  fi
+          restartPolicy: OnFailure
+```
 
 ---
