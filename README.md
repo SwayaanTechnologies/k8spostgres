@@ -3,6 +3,7 @@
 ## **Table of Content**
 
 * [**Manual PostgreSQL Deployment with Persistent Storage**](#manual-postgresql-deployment-with-persistent-storage)
+* [**PostgreSQL Initialization and Manual Replication**](#postgresql-initialization-and-manual-replication)
 
 ## **Manual PostgreSQL Deployment with Persistent Storage**
 
@@ -242,5 +243,224 @@ kubectl run -it postgres-client --rm --image=postgres \
 ```
 
 > When prompted for password, enter the one defined in the Secret.
+
+---
+
+## **PostgreSQL Initialization and Manual Replication**
+
+**PostgreSQL Initialization**
+
+* PostgreSQL uses the Docker image's `/docker-entrypoint.sh` script.
+* Any `.sql` or `.sh` files placed in `/docker-entrypoint-initdb.d/` will be executed only **on first initialization** of the database directory.
+
+**Streaming Replication Essentials**
+
+| Setting               | Description                           |
+| --------------------- | ------------------------------------- |
+| `wal_level = replica` | Enables write-ahead logging           |
+| `max_wal_senders`     | Number of replica connections allowed |
+| `hot_standby = on`    | Enables read-only replicas            |
+| `primary_conninfo`    | Connection string to primary          |
+| `restore_command`     | Optional for PITR (used later)        |
+
+**Authentication Setup**
+
+* Password-less replication uses `.pgpass` file or environment variable injection via Kubernetes **Secrets**.
+
+---
+
+### **Folder Structure**
+
+```
+day2-postgres-replication/
+├── init/
+│   ├── init-db.sh
+│   └── init-user.sql
+├── primary-statefulset.yaml
+├── replica-statefulset.yaml
+├── replication-secret.yaml
+├── replica-service.yaml
+```
+
+---
+
+### **Hands-On Guide**
+
+* [**Create Init Scripts for Primary Initialization**](#create-init-scripts-for-primary-initialization)
+* [**Create Secret for Replication Credentials**](#create-secret-for-replication-credentials)
+* [**Configure Primary StatefulSet**](#configure-primary-statefulset)
+* [**Deploy Primary StatefulSet**](#deploy-primary-statefulset)
+* [**Deploy Replica StatefulSet**](#deploy-replica-statefulset)
+* [**Expose Replica Service**](#expose-replica-service)
+* [**Verify Replication**](#verify-replication)
+
+#### **Create Init Scripts for Primary Initialization**
+
+Create a `ConfigMap` or mount local files using an `emptyDir` volume.
+
+**init-db.sh**
+
+```bash
+#!/bin/bash
+psql -U postgres <<EOF
+CREATE USER replicator REPLICATION LOGIN ENCRYPTED PASSWORD 'replica_pass';
+CREATE DATABASE appdb;
+EOF
+```
+
+Mount into an **init container** as follows:
+
+```yaml
+initContainers:
+  - name: init-db
+    image: postgres:15
+    command: [ "bash", "-c", "/scripts/init-db.sh" ]
+    volumeMounts:
+      - name: init-scripts
+        mountPath: /scripts
+```
+
+---
+
+#### **Create Secret for Replication Credentials**
+
+```yaml
+# replication-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: replication-secret
+type: Opaque
+stringData:
+  REPLICATION_USER: replicator
+  REPLICATION_PASSWORD: replica_pass
+```
+
+Apply:
+
+```bash
+kubectl apply -f replication-secret.yaml
+```
+
+---
+
+#### **Configure Primary StatefulSet**
+
+Key environment variables and `postgresql.conf` parameters:
+
+```yaml
+env:
+  - name: POSTGRES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: postgres-secret
+        key: POSTGRES_PASSWORD
+  - name: POSTGRES_INITDB_ARGS
+    value: "--auth-host=md5"
+
+volumeMounts:
+  - name: data
+    mountPath: /var/lib/postgresql/data
+  - name: config
+    mountPath: /etc/postgresql
+    readOnly: true
+
+configMap includes:
+```
+
+**postgresql.conf**
+
+```ini
+wal_level = replica
+max_wal_senders = 3
+wal_keep_size = 64
+hot_standby = on
+```
+
+---
+
+#### **Deploy Primary StatefulSet**
+
+Use modified version from Day 1, include:
+
+* init container
+* volume for `init-db.sh`
+* replication credentials
+* ConfigMap with `postgresql.conf`
+
+```bash
+kubectl apply -f primary-statefulset.yaml
+```
+
+---
+
+#### **Deploy Replica StatefulSet**
+
+Key changes in replicas:
+
+* Use same image and PVC setup
+* Include `primary_conninfo` with credentials from Secret
+* Add `standby.signal` file during startup to initiate replica mode
+
+Example `replica-start.sh` (entrypoint override):
+
+```bash
+#!/bin/bash
+echo "*:*:*:replicator:${REPLICATION_PASSWORD}" > ~/.pgpass
+chmod 600 ~/.pgpass
+
+echo "primary_conninfo = 'host=postgres-0.postgres.default.svc.cluster.local user=replicator password=${REPLICATION_PASSWORD}'" >> /var/lib/postgresql/data/postgresql.conf
+
+touch /var/lib/postgresql/data/standby.signal
+
+exec docker-entrypoint.sh postgres
+```
+
+Use this script in a ConfigMap and inject via init container or as a wrapper command.
+
+---
+
+#### **Expose Replica Service**
+
+```yaml
+# replica-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+spec:
+  selector:
+    app: postgres-replica
+  ports:
+    - port: 5432
+      targetPort: 5432
+```
+
+---
+
+#### **Verify Replication**
+
+Run the client pod:
+
+```bash
+kubectl run -it postgres-client --rm --image=postgres \
+  -- psql -h postgres-0.postgres.default.svc.cluster.local -U postgres
+```
+
+Inside `psql`, insert sample data:
+
+```sql
+CREATE TABLE test(id INT, name TEXT);
+INSERT INTO test VALUES (1, 'replication test');
+```
+
+Now connect to replica:
+
+```bash
+psql -h postgres-replica.default.svc.cluster.local -U postgres -d appdb
+SELECT * FROM test;
+```
+
+> You should see the same data — replication works!
 
 ---
