@@ -1,0 +1,68 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: cluster-example
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+  enableSuperuserAccess: true
+
+  # Reduce the frequency of standby HA slots updates to once every 5 minutes
+  replicationSlots:
+    highAvailability:
+      enabled: true
+
+  postgresql:
+
+    synchronous:
+      method: any
+      number: 1
+      # preferred: Focuses on self-healing and high availability by automatically 
+      # disabling synchronous replication when no replicas are available in the cluster.
+      dataDurability: preferred
+
+    parameters:
+      pg_stat_statements.max: "10000"
+      pg_stat_statements.track: all
+      #timezone: "Europe/Amsterdam"
+      #"pgaudit.log": "all, -misc"
+      #"pgaudit.log_catalog": "off"
+      #"pgaudit.log_parameter": "on"
+      #"pgaudit.log_relation": "on"
+
+  storage:
+    size: 1Gi
+  walStorage:
+    size: 1Gi
+  tablespaces:
+  - name: idx
+    storage:
+      size: 1Gi
+  - name: tmptbs
+    temporary: true
+    storage:
+      size: 1Gi
+
+  monitoring:
+    enablePodMonitor: true
+
+  backup:
+    #target: "prefer-standby"
+    barmanObjectStore:
+      destinationPath: "s3://cnp/"
+      #Minio local ip
+      endpointURL: "http://host.k3d.internal:9000"
+      s3Credentials:
+        accessKeyId:
+          name: minio-creds
+          key: MINIO_ACCESS_KEY
+        secretAccessKey:
+          name: minio-creds
+          key: MINIO_SECRET_KEY
+      data:
+        immediateCheckpoint: true
+      #wal:
+      #  compression: gzip
+      #  maxParallel: 8
+      #  encryption: AES256
+    retentionPolicy: "1d"

@@ -1,0 +1,16 @@
+kubectl delete -f postgresql-cluster.yaml
+kubectl delete -f pg-nfs-pv.yaml
+
+nano pg-nfs-pv.yaml
+nano postgresql-cluster.yaml
+
+
+kubectl apply -f pg-nfs-pv.yaml
+kubectl apply -f postgresql-cluster.yaml
+
+
+helm install nfs-subdir-external-provisioner nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
+    --set nfs.server=nfs-server.nfs-ns.svc.cluster.local \
+    --set nfs.path=/exports
+
+kubectl describe pvc pg-cluster-1
