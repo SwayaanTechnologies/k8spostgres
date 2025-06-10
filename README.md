@@ -210,7 +210,7 @@ kubectl describe service cluster-example-r
 ./09_upgrade.sh
 ```
 
-Go to the web UI of Minio and check bucket is created with the name `cnp` and check the files inside it ( Check WAL files is created ).
+Go to the web UI of Minio and check bucket is created with the name `cnp` and check the files inside it ( Check WAL(Write-Ahead Logging) files is created ).
 
 **Backup Cluster Data to Minio's**
 
