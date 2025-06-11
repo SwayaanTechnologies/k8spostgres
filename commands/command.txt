@@ -59,3 +59,11 @@ kubectl get nodes
 ./04_get_cluster_config_file.sh 
 ./05_install_cluster.sh 
 kubectl get pods
+
+
+
+
+POSTGRES_CONNECTION_STRING=postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@psql-service:5432/$(POSTGRES_DB)
+
+
+kubectl exec -it psql-client -- sh -c 'PGPASSWORD=$POSTGRES_PASSWORD psql -h "$SERVICE_NAME" -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
