@@ -1,0 +1,42 @@
+apiVersion: v1
+data:
+  database: app
+kind: Secret
+metadata:
+  name: cluster-example-db
+type: kubernetes.io/basic-auth
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: psql-client
+  labels:
+    app: psql
+spec:
+  containers:
+    - name: psql
+      image: alpine/psql
+      env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: cluster-example-superuser
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: cluster-example-superuser
+              key: password
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: cluster-example-db
+              key: database
+        - name: SERVICE_NAME
+          value: cluster-example-rw.default.svc.cluster.local
+      command: ["/bin/sh", "-c"]
+      args:
+        - >
+          echo "Waiting for PostgreSQL...";
+          sleep 5;
+          psql -h $SERVICE_NAME -U $POSTGRES_USER -d $POSTGRES_DB -c '\l';

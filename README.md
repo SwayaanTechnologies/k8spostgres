@@ -163,8 +163,8 @@ login using username `admin` and password `password`
 **Connect to Container and check for minio feature**
 
 ```bash
-docker ps -a
-docker exec -it <container-id> bash
+kubectl get pods
+kubectl exec -it minio bash
 mc alias list
 ```
 
