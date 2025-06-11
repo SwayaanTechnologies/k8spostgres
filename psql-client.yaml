@@ -1,9 +1,10 @@
 apiVersion: v1
-data:
-  database: YXBw
 kind: Secret
 metadata:
   name: cluster-example-db
+type: Opaque
+data:
+  database: YXBw
 ---
 apiVersion: v1
 kind: Pod
@@ -33,9 +34,11 @@ spec:
               key: database
         - name: SERVICE_NAME
           value: cluster-example-rw.default.svc.cluster.local
-      command: ["/bin/sh", "-c"]
-      args:
-        - >
-          echo "Waiting for PostgreSQL...";
-          sleep 5;
-          psql -h $SERVICE_NAME -U $POSTGRES_USER -d $POSTGRES_DB -c '\l';
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "100m"
+        limits:
+          memory: "512Mi"
+          cpu: "250m"
+      command: ["/bin/sh", "-c" ,"sleep 10000"]
